@@ -8,8 +8,7 @@
 
 from __future__ import annotations
 
-import os
-import sys
+import getpass
 import time
 from collections.abc import Callable
 
@@ -18,14 +17,18 @@ from .crypto import (
     decrypt_password,
     encrypt_password,
     fernet_from_key,
-    generate_password,
     hash_master_password,
     load_or_create_key,
     new_salt,
     verify_master_password,
 )
-from .errors import EntryNotFoundError, LockedError, WrongMasterPasswordError
-from .paths import ENV_MASTER, Paths
+from .errors import (
+    EntryNotFoundError,
+    LockedError,
+    WeakPasswordError,
+    WrongMasterPasswordError,
+)
+from .paths import Paths
 from .storage import (
     META_FAIL_COUNT,
     META_LOCK_UNTIL,
@@ -43,15 +46,18 @@ NoteFunc = Callable[[str], None]
 
 
 def _masked_input(text: str) -> str:
-    """Ввод пароля. В некоторых терминалах пароль виден при наборе."""
+    """Ввод пароля без отображения на экране (getpass, с запасным вариантом)."""
     try:
-        sys.stdout.write(text)
-        sys.stdout.flush()
-        password = input()
+        return getpass.getpass(text)
     except (EOFError, KeyboardInterrupt):
         print()
         raise SystemExit("\nВход не выполнен.") from None
-    return password
+    except Exception:  # pragma: no cover - зависит от терминала
+        try:
+            return input(text)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit("\nВход не выполнен.") from None
 
 
 class Vault:
@@ -93,7 +99,9 @@ class Vault:
     def unlock(self) -> None:
         """Проверить таблицы, при первом запуске создать ключ и мастер-пароль.
 
-        При обычных запусках запрашивает мастер-пароль и открывает ключ.
+        При обычных запусках запрашивает пароль и повторяет ввод при ошибке.
+        После ``MAX_FAILED_ATTEMPTS`` неверных попыток подряд ввод блокируется
+        на ``LOCK_SECONDS`` секунд (исключение ``LockedError``).
         """
         self.prepare()
 
@@ -104,8 +112,14 @@ class Vault:
 
         if not self.storage.is_initialized():
             self._first_run_setup()
-        else:
-            self._verify_master()
+            return
+
+        while True:
+            try:
+                self._verify_master()
+                return
+            except WrongMasterPasswordError as exc:
+                self._note(str(exc))
 
     @property
     def fernet(self):
@@ -114,18 +128,15 @@ class Vault:
         return self._fernet
 
     def _first_run_setup(self) -> None:
-        """Первый запуск: создаём файл .key и сохраняем хеш нового мастер-пароля."""
-        self._note("Первый запуск PassKeep.")
-        self._note(f"  каталог хранилища : {self.paths.home}")
-        self._note(f"  база данных       : {self.paths.db_path}")
-        self._note(f"  файл ключа        : {self.paths.key_path}")
-        self._note("Придумайте мастер-пароль (не менее 8 символов).")
-        self._note("Если он будет утерян, восстановить пароли невозможно.")
-
+        """Первый запуск: создаём файл .key и сохраняем хеш нового пароля."""
         while True:
-            password = self._read_master("Новый мастер-пароль: ")
-            check_master_strength(password, min_length=8)
-            again = self._read_master("Повторите мастер-пароль:  ")
+            password = self._read_master("Создайте пароль для входа (не менее 8 символов): ")
+            try:
+                check_master_strength(password, min_length=8)
+            except WeakPasswordError as exc:
+                self._note(f"Ошибка: {exc}")
+                continue
+            again = self._read_master("Повторите пароль: ")
             if password != again:
                 self._note("Пароли не совпадают, попробуйте ещё раз.")
                 continue
@@ -136,12 +147,10 @@ class Vault:
         self.storage.set_meta(META_MASTER_HASH, hash_master_password(password, salt))
         self.storage.set_meta(META_FAIL_COUNT, "0")
         self.storage.set_meta(META_LOCK_UNTIL, "0")
-        self._note("Мастер-пароль сохранён в виде соли и PBKDF2-SHA256 хеша.")
+        self._note("Пароль сохранён, аутентификация успешна")
 
     def _read_master(self, text: str) -> str:
-        """Мастер-пароль из окружения (для скриптов) либо из терминала."""
-        from_env = os.environ.get(ENV_MASTER)
-        return from_env if from_env else self._prompt(text)
+        return self._prompt(text)
 
     def _check_lock(self) -> None:
         raw = self.storage.get_meta(META_LOCK_UNTIL)
@@ -160,7 +169,7 @@ class Vault:
     def _verify_master(self) -> None:
         salt_hex = self.storage.get_meta(META_MASTER_SALT) or ""
         hash_hex = self.storage.get_meta(META_MASTER_HASH) or ""
-        password = self._read_master("Мастер-пароль: ")
+        password = self._read_master("Введите пароль: ")
 
         if verify_master_password(password, salt_hex, hash_hex):
             self.storage.set_meta(META_FAIL_COUNT, "0")
@@ -213,7 +222,3 @@ class Vault:
 
     def count(self) -> int:
         return self.storage.entry_count()
-
-    @staticmethod
-    def generate(length: int = 16, use_digits: bool = True, use_symbols: bool = True) -> str:
-        return generate_password(length=length, use_digits=use_digits, use_symbols=use_symbols)

@@ -27,10 +27,13 @@ from .errors import KeyNotFoundError, WeakPasswordError
 PBKDF2_ITERATIONS = 200_000
 SALT_BYTES = 16
 
+MIN_PASSWORD_LENGTH = 8
+MAX_PASSWORD_LENGTH = 64
+
 LOWERCASE = string.ascii_lowercase
 UPPERCASE = string.ascii_uppercase
 DIGITS = string.digits
-SYMBOLS = "!@#$%^&*()-_=+[]{};:,.<>?/"
+SYMBOLS = "!@#$%^&*"
 # Символы, которые легко перепутать при ручном вводе, исключены из алфавита.
 AMBIGUOUS = "il1LIoO0"
 
@@ -122,15 +125,28 @@ def decrypt_password(fernet: Fernet, token: str) -> str:
 # ---------------------------------------------------------------------------
 def generate_password(
     length: int = 16,
+    use_uppercase: bool = True,
+    use_lowercase: bool = True,
     use_digits: bool = True,
     use_symbols: bool = True,
     exclude_ambiguous: bool = True,
 ) -> str:
-    """Сгенерировать случайный пароль через ``secrets`` (криптостойкий ГСЧ)."""
-    if length < 8:
-        raise WeakPasswordError("Длина пароля меньше 8 символов - это ненадёжно.")
+    """Сгенерировать случайный пароль через ``secrets`` (криптостойкий ГСЧ).
 
-    pools = [LOWERCASE, UPPERCASE]
+    Типы символов выбираются флагами; если не выбран ни один - ошибка.
+    Длина ограничена диапазоном ``MIN_PASSWORD_LENGTH``..``MAX_PASSWORD_LENGTH``.
+    """
+    if not MIN_PASSWORD_LENGTH <= length <= MAX_PASSWORD_LENGTH:
+        raise WeakPasswordError(
+            f"Длина пароля должна быть от {MIN_PASSWORD_LENGTH} до "
+            f"{MAX_PASSWORD_LENGTH} символов."
+        )
+
+    pools: list[str] = []
+    if use_uppercase:
+        pools.append(UPPERCASE)
+    if use_lowercase:
+        pools.append(LOWERCASE)
     if use_digits:
         pools.append(DIGITS)
     if use_symbols:
@@ -138,6 +154,10 @@ def generate_password(
 
     if exclude_ambiguous:
         pools = ["".join(ch for ch in pool if ch not in AMBIGUOUS) for pool in pools]
+    pools = [pool for pool in pools if pool]
+
+    if not pools:
+        raise WeakPasswordError("Не выбран ни один тип символов.")
 
     alphabet = "".join(pools)
     # Гарантируем присутствие минимум одного символа из каждого пула.
